@@ -18,10 +18,10 @@
       </article>
     </div>
 
-    <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+    <form class="filter-bar" @submit.prevent="applyFilters">
+      <label v-for="field in filterFields" :key="field.key" class="filter-item">
+        <span>{{ field.label }}</span>
+        <input v-model="filters[field.key]" :placeholder="field.placeholder" />
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -50,24 +50,30 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无观测站点数据，可先登记观测站点</td>
+          <td :colspan="columns.length + 1" class="empty-state">{{ emptyHint }}</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条观测站点记录</span>
+      <div class="pager">
+        <button class="btn ghost" type="button" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
+        <span class="page-info">第 {{ page }} / {{ pageCount }} 页</span>
+        <button class="btn ghost" type="button" :disabled="page >= pageCount" @click="goPage(page + 1)">下一页</button>
+      </div>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type FilterKey = 'code' | 'name' | 'category'
 
 const ENDPOINT = '/api/station'
 const columns = ["站点编码", "站点名称", "站点类别", "经纬度坐标", "海拔高度", "建站年份", "值守方式", "站点状态"]
@@ -75,19 +81,89 @@ const actions = ["办理入网", "标记降级", "停用站点"]
 const statuses = ["待入网", "正常运行", "降级运行", "已停用"]
 const stats = [{"label": "在网站点", "value": 0}, {"label": "降级站点", "value": 0}, {"label": "停用站点", "value": 0}]
 
+const filterFields: { key: FilterKey; label: string; placeholder: string }[] = [
+  { key: 'code', label: '站点编码', placeholder: '精确匹配，如 STAT-0001' },
+  { key: 'name', label: '站点名称', placeholder: '按站点名称检索' },
+  { key: 'category', label: '站点类别', placeholder: '按站点类别检索' },
+]
+
+// 站点编码写法：2-6 位字母 + 短横线 + 4 位数字，与后端口径一致。
+const CODE_PATTERN = /^[A-Za-z]{2,6}-\d{4}$/
+const CODE_FORMAT_HINT = '站点编码写法不对：应为「字母-四位数字」，例如 STAT-0001'
+
+const STATE_KEY = 'station:list-state'
+const PAGE_SIZE = 10
+
 const rows = ref<Row[]>([])
 const total = ref(0)
+const page = ref(1)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filters = ref<Record<FilterKey, string>>({ code: '', name: '', category: '' })
+
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+const hasActiveFilters = computed(() =>
+  Boolean(filters.value.code.trim() || filters.value.name.trim() || filters.value.category.trim()),
+)
+const emptyHint = computed(() =>
+  hasActiveFilters.value
+    ? '当前筛选条件下没有匹配的观测站点，可调整条件后重新查询'
+    : '暂无观测站点数据，可先登记观测站点',
+)
+
+function persistState() {
+  sessionStorage.setItem(STATE_KEY, JSON.stringify({ filters: filters.value, page: page.value }))
+}
+
+function restoreState() {
+  try {
+    const saved = sessionStorage.getItem(STATE_KEY)
+    if (!saved) return
+    const state = JSON.parse(saved) as { filters?: Record<FilterKey, string>; page?: number }
+    filters.value = { code: '', name: '', category: '', ...state.filters }
+    page.value = Math.max(1, Number(state.page) || 1)
+  } catch {
+    sessionStorage.removeItem(STATE_KEY)
+  }
+}
+
+function validateFilters(): boolean {
+  const code = filters.value.code.trim()
+  if (code && !CODE_PATTERN.test(code)) {
+    errorMessage.value = `${CODE_FORMAT_HINT}（当前填写：${code}）`
+    return false
+  }
+  return true
+}
+
+function activeParams(): URLSearchParams {
+  const params = new URLSearchParams()
+  if (filters.value.code.trim()) params.set('code', filters.value.code.trim())
+  if (filters.value.name.trim()) params.set('name', filters.value.name.trim())
+  if (filters.value.category.trim()) params.set('category', filters.value.category.trim())
+  return params
+}
+
+function applyFilters() {
+  page.value = 1
+  void reload()
+}
 
 function resetFilters() {
-  filters.value = {}
+  filters.value = { code: '', name: '', category: '' }
+  page.value = 1
+  void reload()
+}
+
+function goPage(target: number) {
+  page.value = Math.min(Math.max(1, target), pageCount.value)
   void reload()
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  if (!validateFilters()) return
+  const params = activeParams()
+  const query = params.toString()
+  window.open(`${ENDPOINT}/export${query ? `?${query}` : ''}`, '_blank')
 }
 
 function openCreate() {
@@ -112,19 +188,27 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  if (!validateFilters()) return
+  const params = activeParams()
+  params.set('page', String(page.value))
+  params.set('size', String(PAGE_SIZE))
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${params.toString()}`)
     if (!response.ok) {
-      throw new Error('观测站点列表读取失败')
+      const detail = await response.json().then((body) => body?.detail).catch(() => null)
+      throw new Error(typeof detail === 'string' ? detail : '观测站点列表读取失败')
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    persistState()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '观测站点列表读取失败'
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  restoreState()
+  void reload()
+})
 </script>
