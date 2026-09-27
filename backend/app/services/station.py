@@ -1,6 +1,7 @@
 """观测站点业务规则：状态流转、字段校验与筛选口径都收在这里。"""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.store import store
@@ -11,19 +12,41 @@ STATUS_ORDER = ["待入网", "正常运行", "降级运行", "已停用"]
 ACTION_RULES = {"办理入网": "正常运行", "标记降级": "降级运行", "停用站点": "已停用"}
 NEGATIVE_ACTIONS = ["停用站点"]
 
+# 站点编码写法：字母前缀 + 短横线 + 数字序号，例如 STAT-0001
+CODE_PATTERN = re.compile(r"^[A-Za-z]+-\d+$")
+CODE_HINT = "站点编码写法不对：应为「字母-数字」组合，例如 STAT-0001"
+
 
 class StationService:
+    def validate_code(self, code: str | None) -> str | None:
+        """站点编码填了就要写得对；返回 None 表示通过，否则返回指明哪一项有问题的说明。"""
+        if code is None or not code.strip():
+            return None
+        if not CODE_PATTERN.fullmatch(code.strip()):
+            return f"{CODE_HINT}，当前「站点编码」填的是「{code.strip()}」，请改正后再查询"
+        return None
+
     def list_entries(
         self,
         *,
-        keyword: str | None = None,
+        code: str | None = None,
+        name: str | None = None,
+        category: str | None = None,
         status: str | None = None,
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
+        """站点编码、站点名称、站点类别同时填写时取交集过滤。"""
         rows = store.rows(MODULE)
-        if keyword:
-            rows = [row for row in rows if keyword in str(row.get("站点编码", ""))]
+        if code and code.strip():
+            needle = code.strip().lower()
+            rows = [row for row in rows if needle in str(row.get("站点编码", "")).lower()]
+        if name and name.strip():
+            needle = name.strip()
+            rows = [row for row in rows if needle in str(row.get("站点名称", ""))]
+        if category and category.strip():
+            needle = category.strip()
+            rows = [row for row in rows if needle in str(row.get("站点类别", ""))]
         if status:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)

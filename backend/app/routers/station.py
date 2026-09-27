@@ -16,18 +16,41 @@ LIST_FIELDS = ["站点编码", "站点名称", "站点类别", "经纬度坐标"
 STATUSES = ["待入网", "正常运行", "降级运行", "已停用"]
 
 
+def _check_code(code: str | None) -> None:
+    """站点编码写法不对时先拦下，并讲清是哪一项出了问题。"""
+    code_error = service.validate_code(code)
+    if code_error:
+        raise HTTPException(status_code=400, detail=code_error)
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按站点编码检索"),
+    code: str | None = Query(default=None, description="按站点编码模糊检索"),
+    name: str | None = Query(default=None, description="按站点名称模糊检索"),
+    category: str | None = Query(default=None, description="按站点类别模糊检索"),
     status: str | None = Query(default=None, description="待入网、正常运行、降级运行、已停用"),
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1),
 ) -> PageResult[dict]:
-    """按站点编码与状态过滤观测站点列表；没有数据时返回空页，不报错。"""
+    """按站点编码、站点名称、站点类别取交集过滤观测站点列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    _check_code(code)
+    items, total = service.list_entries(code=code, name=name, category=category, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries(
+    code: str | None = Query(default=None, description="按站点编码模糊检索"),
+    name: str | None = Query(default=None, description="按站点名称模糊检索"),
+    category: str | None = Query(default=None, description="按站点类别模糊检索"),
+    status: str | None = Query(default=None, description="待入网、正常运行、降级运行、已停用"),
+) -> dict[str, Any]:
+    """导出观测站点清单：与列表页同一套筛选条件取数，条数与列表页脚一致。"""
+    _check_code(code)
+    items, total = service.list_entries(code=code, name=name, category=category, status=status, page=1, size=10000)
+    return {"module": "station", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +79,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出观测站点清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "station", "total": total, "items": items}
